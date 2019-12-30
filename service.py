@@ -11,7 +11,10 @@ from mongoqueue import MongoQueue
 
 from influxdb import InfluxDBClient
 
+from easysnmp import Session
 from worker import Worker, ServiceExit
+
+from transform import get_point, get_points
 
 # loading .env file
 load_dotenv()
@@ -44,7 +47,19 @@ def do_work(job):
         try:
             # Job code here
             print('Job #%s is started' % str(job.job_id))
-            sleep(5)
+            # Init SNMP session
+            snmp = Session(hostname=job.payload['hostname'],
+                           community=job.payload['community'],
+                           version=2)
+
+            tags = job.payload.setdefault('tags', {})
+
+            # Lets walk...
+            for oid in job.payload['oids']:
+                points = get_point(snmp.get(oid)) or get_points(snmp.walk(oid))
+                points = [points] if type(points) is not list else points
+                influx.write_points(points, tags=tags, time_precision='s')
+
             # Job is done
             job.complete()
         except Exception as err:

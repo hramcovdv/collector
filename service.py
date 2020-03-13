@@ -1,30 +1,26 @@
 #!/usr/bin/env python3
 
 import os
+import time
 import signal
 
-from time import sleep
 from dotenv import load_dotenv
 
 from pymongo import MongoClient
 from mongoqueue import MongoQueue
 
-from influxdb import InfluxDBClient
-
 from easysnmp import Session
 from worker import Worker, ServiceExit
-
-from transform import get_point, get_points
 
 # loading .env file
 load_dotenv()
 
-# Init connection to MongoDB server
-mongo = MongoClient('mongodb://%s:%s@localhost' % ('root', 'root'))
+# Init connection to MongoDB server and creaet DB
+mongo = MongoClient(os.getenv('MONGO_URL'))
+db = mongo[os.getenv('MONGO_DB')]
+
 # Init queue in MongoDB server
-queue = MongoQueue(mongo.collector.tasks, consumer_id=os.getenv('CONSUMER'))
-# Init connection to InfluxDB
-influx = InfluxDBClient('localhost', 8086, 'root', 'root', 'collector')
+queue = MongoQueue(db['tasks'], consumer_id=os.getenv('CONSUMER'))
 
 def service_shutdown(signum, frame):
     """ Shutdown when caught signal
@@ -33,38 +29,51 @@ def service_shutdown(signum, frame):
     raise ServiceExit
 
 def get_job():
-    """ Find a job or take a break
+    """ Find a next job
     """
-    job = queue.next()
-    if job is None:
-        sleep(0.5)
-    return job
+    while True:
+        yield queue.next()
 
+def job_check(func):
+    def checked(job):
+        if job is not None:
+            func(job)
+        else:
+            print('There is no job :(')
+            time.sleep(0.5)
+        
+    return checked
+
+@job_check
 def do_work(job):
     """ Do the work if there is
     """
-    if not job is None:
-        try:
-            # Job code here
-            print('Job #%s is started' % str(job.job_id))
-            # Init SNMP session
-            snmp = Session(hostname=job.payload['hostname'],
-                           community=job.payload['community'],
-                           version=2)
-
-            tags = job.payload.setdefault('tags', {})
-
-            # Lets walk...
-            for oid in job.payload['oids']:
-                points = get_point(snmp.get(oid)) or get_points(snmp.walk(oid))
-                points = [points] if type(points) is not list else points
-                influx.write_points(points, tags=tags, time_precision='s')
-
-            # Job is done
-            job.complete()
-        except Exception as err:
-            print('Job #%s ended with an error: %s' % (str(job.job_id), str(err)))
-            job.error(message=str(err))
+    try:
+        print('Job id %s is started' % job.job_id)
+        start_time = time.time()
+        
+        session = Session(hostname=job.payload['hostname'],
+                          community=job.payload['community'],
+                          version=2,
+                          retries=1,
+                          timeout=3)
+        
+        for item in session.walk(job.payload['oids']):
+            print('{oid}.{oid_index} {snmp_type} = {value}'.format(
+                oid=item.oid,
+                oid_index=item.oid_index,
+                snmp_type=item.snmp_type,
+                value=item.value
+            ))
+    except Exception as err:
+        print('Job id {0} ended with an error: {1}'.format(job.job_id, str(err)))
+        job.error(message=str(err))
+    else:
+        print('Job id {0} is complete in {1:.2f} sec'.format(job.job_id,
+                                                             time.time() - start_time))            
+        job.complete()
+    finally:
+        print('Jobs left: %d' % queue.size())
 
 def main():
     """ Main program
@@ -76,7 +85,7 @@ def main():
     print('Starting main program')
 
     # Init workers
-    threads = [Worker(do_work, get_job) for w in range(int(os.getenv('THREADS')))]
+    threads = [Worker(get_job, do_work) for w in range(int(os.getenv('THREADS')))]
 
     try:
         # Start the job threads
@@ -85,7 +94,7 @@ def main():
         # Keep the main thread running,
         # otherwise signals are ignored.
         while True:
-            sleep(0.5)
+            time.sleep(0.5)
     except ServiceExit:
         # Terminate the running threads.
         # Set the shutdown flag on each thread to
@@ -93,6 +102,8 @@ def main():
         for t in threads:
             t.stop()
             t.join()
+    finally:
+        mongo.close()
 
 if __name__ == '__main__':
     main()

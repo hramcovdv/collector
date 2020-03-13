@@ -1,9 +1,10 @@
 import threading
 
-from time import sleep
-
 class Worker(threading.Thread):
-    def __init__(self, do_work, get_job):
+    """ A worker class
+    """
+    
+    def __init__(self, get_job, do_work):
         # ... Thread init ...
         threading.Thread.__init__(self)
 
@@ -11,18 +12,28 @@ class Worker(threading.Thread):
         # indicates whether the thread should be terminated.
         self.shutdown_flag = threading.Event()
 
-        # ... Other thread setup ...
-        self.do_work = do_work
+        # Generator that get the job
         self.get_job = get_job
-        self.current_job = None
+        
+        # Function that run the work
+        self.do_work = do_work
 
     def run(self):
+        """ Run work loop
+        """
         print('Thread #%s started' % self.ident)
+        
+        # Init job generator
+        job = self.get_job()
+        
         while not self.shutdown_flag.is_set():
-            self.do_work(self.get_job())
+            self.do_work(next(job))
+            
         print('Thread #%s stopped' % self.ident)
 
     def stop(self):
+        """ Send a shutdown flag to the work loop
+        """
         self.shutdown_flag.set()
 
 class ServiceExit(Exception):

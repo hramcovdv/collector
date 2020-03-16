@@ -3,6 +3,7 @@
 import os
 import time
 import signal
+import logging
 
 from dotenv import load_dotenv
 
@@ -24,10 +25,15 @@ db = mongo[os.getenv('MONGO_DB')]
 # Init queue in MongoDB server
 queue = MongoQueue(db['tasks'], consumer_id=os.getenv('CONSUMER'))
 
+# init logging config
+logging.basicConfig(filename='messages.log',
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    level=logging.INFO)
+
 def service_shutdown(signum, frame):
     """ Shutdown when caught signal
     """
-    print('\nCaught signal %d' % signum)
+    print(f'\nCaught signal {signum}')
     raise ServiceExit
 
 def get_job():
@@ -37,7 +43,7 @@ def get_job():
         job = queue.next()
         
         if job is None:
-            print('There is no job :(')
+            # print('There is no job, go sleep :(')
             time.sleep(0.5)
         else:
             yield job
@@ -46,7 +52,8 @@ def do_work(job):
     """ Do the work
     """
     try:
-        print('Job id %s is started' % job.job_id)
+        logging.info(f'Job id {job.job_id} is started')
+        
         start_time = time.time()
         
         session = Session(hostname=job.payload['hostname'],
@@ -56,17 +63,17 @@ def do_work(job):
                           timeout=3)
         
         for item in session.walk(job.payload['oids']):
-            print_snmp_variable(item)
+            # print_snmp_variable(item)
+            pass
 
     except Exception as err:
-        print('Job id {0} ended with an error: {1}'.format(job.job_id, str(err)))
+        logging.error(f'Job id {job.job_id} ended with: {err}')
         job.error(message=str(err))
     else:
-        print('Job id {0} is complete in {1:.2f} sec'.format(job.job_id,
-                                                             time.time() - start_time))            
+        logging.info(f'Job id {job.job_id} is complete in {time.time()-start_time:.2f} sec')            
         job.complete()
     finally:
-        print('Jobs left: %d' % queue.size())
+        print(f'Jobs left: {queue.size()}', end='\r')
 
 def main():
     """ Main program
@@ -97,6 +104,8 @@ def main():
             t.join()
     finally:
         mongo.close()
+        
+    print('Stopping main program')
 
 if __name__ == '__main__':
     main()

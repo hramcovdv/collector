@@ -12,6 +12,8 @@ from mongoqueue import MongoQueue
 from easysnmp import Session
 from worker import Worker, ServiceExit
 
+from helpers import print_snmp_variable
+
 # loading .env file
 load_dotenv()
 
@@ -32,21 +34,16 @@ def get_job():
     """ Find a next job
     """
     while True:
-        yield queue.next()
-
-def job_check(func):
-    def checked(job):
-        if job is not None:
-            func(job)
-        else:
+        job = queue.next()
+        
+        if job is None:
             print('There is no job :(')
             time.sleep(0.5)
-        
-    return checked
+        else:
+            yield job
 
-@job_check
 def do_work(job):
-    """ Do the work if there is
+    """ Do the work
     """
     try:
         print('Job id %s is started' % job.job_id)
@@ -59,12 +56,8 @@ def do_work(job):
                           timeout=3)
         
         for item in session.walk(job.payload['oids']):
-            print('{oid}.{oid_index} {snmp_type} = {value}'.format(
-                oid=item.oid,
-                oid_index=item.oid_index,
-                snmp_type=item.snmp_type,
-                value=item.value
-            ))
+            print_snmp_variable(item)
+
     except Exception as err:
         print('Job id {0} ended with an error: {1}'.format(job.job_id, str(err)))
         job.error(message=str(err))

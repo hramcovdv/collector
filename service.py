@@ -4,16 +4,10 @@ import os
 import time
 import signal
 import logging
-
 from dotenv import load_dotenv
-
 from pymongo import MongoClient
-from mongoqueue import MongoQueue
 
-from easysnmp import Session
-from worker import Worker, ServiceExit
-
-from helpers import print_snmp_variable
+from worker import Worker
 
 # loading .env file
 load_dotenv()
@@ -22,13 +16,17 @@ load_dotenv()
 mongo = MongoClient(os.getenv('MONGO_URL'))
 db = mongo[os.getenv('MONGO_DB')]
 
-# Init queue in MongoDB server
-queue = MongoQueue(db['tasks'], consumer_id=os.getenv('CONSUMER'))
-
 # init logging config
 logging.basicConfig(filename='messages.log',
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     level=logging.INFO)
+
+class ServiceExit(Exception):
+    """
+    Custom exception which is used to trigger the clean exit
+    of all running threads and the main program.
+    """
+    pass
 
 def service_shutdown(signum, frame):
     """ Shutdown when caught signal
@@ -36,76 +34,41 @@ def service_shutdown(signum, frame):
     print(f'\nCaught signal {signum}')
     raise ServiceExit
 
-def get_job():
-    """ Find a next job
-    """
-    while True:
-        job = queue.next()
-        
-        if job is None:
-            # print('There is no job, go sleep :(')
-            time.sleep(0.5)
-        else:
-            yield job
-
-def do_work(job):
-    """ Do the work
-    """
-    try:
-        logging.info(f'Job id {job.job_id} is started')
-        
-        start_time = time.time()
-        
-        session = Session(hostname=job.payload['hostname'],
-                          community=job.payload['community'],
-                          version=2,
-                          retries=1,
-                          timeout=3)
-        
-        for item in session.walk(job.payload['oids']):
-            # print_snmp_variable(item)
-            pass
-
-    except Exception as err:
-        logging.error(f'Job id {job.job_id} ended with: {err}')
-        job.error(message=str(err))
-    else:
-        logging.info(f'Job id {job.job_id} is complete in {time.time()-start_time:.2f} sec')            
-        job.complete()
-    finally:
-        print(f'Jobs left: {queue.size()}', end='\r')
-
 def main():
-    """ Main program
+    """ Main service
     """
     # Register the signal handlers
     signal.signal(signal.SIGTERM, service_shutdown)
     signal.signal(signal.SIGINT, service_shutdown)
 
-    print('Starting main program')
+    print('Starting main service')
 
     # Init workers
-    threads = [Worker(get_job, do_work) for w in range(int(os.getenv('THREADS')))]
+    workers = []
+        
+    for _ in range(int(os.getenv('THREADS'))):
+        worker = Worker(db)
+        worker.start()
+        workers.append(worker)
 
-    try:
-        # Start the job threads
-        for t in threads:
-            t.start()
+    try:       
         # Keep the main thread running,
         # otherwise signals are ignored.
-        while True:
+        while any([w.is_alive() for w in workers]):
             time.sleep(0.5)
     except ServiceExit:
         # Terminate the running threads.
         # Set the shutdown flag on each thread to
         # trigger a clean shutdown of each thread.
-        for t in threads:
-            t.stop()
-            t.join()
+        for worker in workers:
+            worker.stop()
+            worker.join()
+    except Exception as err:
+        print(f'Main service ended with: {err}')
     finally:
         mongo.close()
         
-    print('Stopping main program')
+    print('Stopping main service')
 
 if __name__ == '__main__':
     main()

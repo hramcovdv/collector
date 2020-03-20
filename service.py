@@ -2,25 +2,27 @@
 
 import os
 import time
+import yaml
 import signal
 import logging
 from dotenv import load_dotenv
-from pymongo import MongoClient
-from mongoqueue import MongoQueue
+from redis import Redis
+from redisqueue import RedisQueue
+from easysnmp import Session
 
 from worker import Worker
 
 # loading .env file
 load_dotenv()
 
-# Init connection to MongoDB server and creaet DB
-mongo = MongoClient(os.getenv('MONGO_URL'))
-db = mongo[os.getenv('MONGO_DB')]
+# Init redis connection
+memo = Redis(host=os.getenv('REDIS_IP'),
+             port=os.getenv('REDIS_PORT'),
+             db=os.getenv('REDIS_DB'))
 
-# Init queue in MongoDB server
-queue = MongoQueue(collection=db.tasks,
-                   consumer_id=os.getenv('CONSUMER'),
-                   max_attempts=1)
+# init redis queue
+queue = RedisQueue(connection=memo,
+                   name=os.getenv('QUEUE'))
 
 # init logging config
 logging.basicConfig(filename=os.getenv('LOGGING'),
@@ -40,19 +42,31 @@ def service_shutdown(signum, frame):
     print(f'\nCaught signal {signum}')
     raise ServiceExit
 
-def statistics(queue, interval=1):
-    """ Statistic generator
-    """
-    previous_count = 0
+def do_work():
+    global queue
     
-    while True:
-        current_count = queue.size()
-        performance = round((previous_count - current_count) / interval)
+    job = queue.get(timeout=1)
 
-        yield f'Jobs left: {current_count}, Performance: {performance} jobs/sec'
+    if job is None:
+        return
+    
+    job = yaml.safe_load(job)
 
-        time.sleep(interval)
-        previous_count = current_count
+    try:
+        start_time = time.time()
+
+        session = Session(hostname=job['hostname'],
+                          community=job['community'],
+                          version=2,
+                          retries=1,
+                          timeout=3)
+
+        for item in session.walk(job['oids']):
+            pass
+    except Exception as err:
+        logging.error(f'Job ended with: {err}')
+    else:
+        logging.info(f'Job is complete in {time.time()-start_time:.2f} sec')            
 
 def main():
     """ Main service
@@ -67,21 +81,16 @@ def main():
     workers = []
         
     for _ in range(int(os.getenv('THREADS'))):
-        worker = Worker(queue)
+        worker = Worker(do_work)
         worker.start()
         workers.append(worker)
 
     try:
-        # Repair locked jobs
-        queue.repair()
-        
-        # Init status generator
-        status = statistics(queue)
-        
         # Keep the main thread running,
         # otherwise signals are ignored.
         while any([w.is_alive() for w in workers]):
-            print('{:<80}'.format(next(status)), end='\r')
+            print(f'Jobs left: {queue.size():>10d}', end='\r')
+            time.sleep(0.5)
     except ServiceExit:
         # Terminate the running threads.
         # Set the shutdown flag on each thread to
@@ -91,8 +100,6 @@ def main():
             worker.join()
     except Exception as err:
         print(f'Main service ended with: {err}')
-    finally:
-        mongo.close()
 
     print('Stopping main service')
 

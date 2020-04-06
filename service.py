@@ -126,6 +126,7 @@ def main():
         # trigger a clean shutdown of each thread.
         for worker in workers:
             worker.stop()
+        for worker in workers:
             worker.join()
     except Exception as error:
         print(f"Main service ended with error: {error}")

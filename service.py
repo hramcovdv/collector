@@ -10,7 +10,7 @@ from redis import Redis
 from redisqueue import RedisQueue
 from easysnmp import Session, EasySNMPError
 
-from worker import Worker
+from worker import Pool
 
 # loading .env file
 load_dotenv()
@@ -51,33 +51,44 @@ def service_shutdown(signum, frame):
     raise ServiceExit
 
 
-def do_work():
-    global queue
+def snmp_work(job):
+    """ Do SNMP-work
+    """
+    session = Session(
+        hostname=job['hostname'],
+        community=job['community'],
+        version=2,
+        retries=1,
+        timeout=5,
+        )
 
-    item = queue.get(timeout=1)
+    return session.walk(job['oids'])
 
-    if item is None: return
 
-    job = yaml.safe_load(item)
+def store(result):
+    """ Stored work result
+    """
+    pass
+
+
+def do_work(queue):
+    """ Do work in loop
+    """
+    result = None
 
     try:
         start_time = time.time()
 
-        session = Session(hostname=job['hostname'],
-            community=job['community'],
-            version=2,
-            retries=1,
-            timeout=5
-            )
+        job = queue.get(timeout=1)
 
-        for _ in session.walk(job['oids']):
-            pass
-    except EasySNMPError as error:
-        logging.error(f"Job on {job['hostname']} ended with error: {error}")
+        if job:
+            result = snmp_work(yaml.safe_load(job))
     except Exception as error:
         logging.error(f"Job ended with error: {error}")
     else:
         logging.info(f"Job was complete in {time.time()-start_time:.2f} sec")
+    finally:
+        return result
 
 
 def statistics(interval=1):
@@ -105,31 +116,35 @@ def main():
 
     print("Starting main service")
 
-    # Init status generator
-    status = statistics()
-
     # Init workers
-    workers = []
-    for _ in range(int(os.getenv('THREADS'))):
-        worker = Worker(target=do_work, daemon=True)
-        worker.start()
-        workers.append(worker)
+    workers = Pool(
+        size=os.getenv('THREADS'),
+        target=do_work,
+        args=(queue,),
+        callback=store
+        )
 
     try:
+        # Init status generator
+        status = statistics()
+
+        # Start threads
+        workers.start()
+
         # Keep the main thread running,
         # otherwise signals are ignored.
-        while any([w.is_alive() for w in workers]):
+        while workers.is_alive():
             print("{:<80}".format(next(status)), end="\r")
     except ServiceExit:
         # Terminate the running threads.
         # Set the shutdown flag on each thread to
         # trigger a clean shutdown of each thread.
-        for worker in workers:
-            worker.stop()
-        for worker in workers:
-            worker.join()
+        workers.stop()
     except Exception as error:
         print(f"Main service ended with error: {error}")
+    finally:
+        workers.join()
+        memo.close()
 
     print("Stopping main service")
 
